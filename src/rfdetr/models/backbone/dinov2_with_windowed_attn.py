@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
+from transformers.backbone_utils import BackboneConfigMixin, BackboneMixin
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
     BackboneOutput,
@@ -23,7 +24,7 @@ from transformers.modeling_outputs import (
     ImageClassifierOutput,
 )
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+from transformers.pytorch_utils import prune_linear_layer
 from transformers.utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -32,11 +33,21 @@ from transformers.utils import (
     replace_return_docstrings,
     torch_int,
 )
-from transformers.utils.backbone_utils import (
-    BackboneConfigMixin,
-    BackboneMixin,
-    get_aligned_output_features_output_indices,
-)
+
+
+def find_pruneable_heads_and_indices(
+    heads: List[int], n_heads: int, head_size: int, already_pruned_heads: Set[int]
+) -> Tuple[Set[int], torch.LongTensor]:
+    """Compute pruneable head indices (Transformers 5 removed helper)."""
+
+    mask = torch.ones(n_heads, head_size)
+    heads = set(heads) - already_pruned_heads
+    for head in heads:
+        head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+        mask[head] = 0
+    mask = mask.view(-1).contiguous().eq(1)
+    index = torch.arange(len(mask))[mask].long()
+    return heads, index
 
 logger = logging.get_logger(__name__)
 
@@ -175,9 +186,8 @@ class WindowedDinov2WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         self.use_swiglu_ffn = use_swiglu_ffn
         self.num_register_tokens = num_register_tokens
         self.stage_names = ["stem"] + [f"stage{idx}" for idx in range(1, num_hidden_layers + 1)]
-        self._out_features, self._out_indices = get_aligned_output_features_output_indices(
-            out_features=out_features, out_indices=out_indices, stage_names=self.stage_names
-        )
+        # Transformers 5: align and validate via BackboneConfigMixin.
+        self.set_output_features_output_indices(out_features=out_features, out_indices=out_indices)
         self.apply_layernorm = apply_layernorm
         self.reshape_hidden_states = reshape_hidden_states
         self.num_windows = num_windows
@@ -1015,7 +1025,10 @@ class WindowedDinov2WithRegistersForImageClassification(WindowedDinov2WithRegist
 class WindowedDinov2WithRegistersBackbone(WindowedDinov2WithRegistersPreTrainedModel, BackboneMixin):
     def __init__(self, config: WindowedDinov2WithRegistersConfig):
         super().__init__(config)
-        super()._init_backbone(config)
+        # Transformers 5: initialize backbone bookkeeping via BackboneMixin.
+        # (Cooperative `__init__` may or may not reach BackboneMixin.__init__ through the PreTrainedModel chain.)
+        if getattr(self, "stage_names", None) is None and hasattr(self, "_init_transformers_backbone"):
+            self._init_transformers_backbone()
         self.num_features = [config.hidden_size for _ in range(config.num_hidden_layers + 1)]
         self.embeddings = WindowedDinov2WithRegistersEmbeddings(config)
         self.encoder = WindowedDinov2WithRegistersEncoder(config)

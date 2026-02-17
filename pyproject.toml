@@ -41,7 +41,8 @@ dependencies = [
     "torchvision>=0.14.0",
     "scipy",
     "tqdm",
-    "transformers>4.0.0, <5.0.0",
+    # Support Transformers 5.x.
+    "transformers>=5.1.0, <6.0.0",
     "peft",
     "rf100vl",
     "pydantic",
